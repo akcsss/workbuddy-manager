@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -402,7 +402,8 @@ namespace WorkBuddyLauncher
 
         private void UpdateAddressLabel()
         {
-            _lblAddress.Text = "面板地址：" + AddressUrl();
+            string hint = EnvConfig.IsWildcard(_currentHost) ? "（监听所有网卡）" : "";
+            _lblAddress.Text = "面板地址：" + AddressUrl() + hint;
         }
 
         private void SetState(ProjectState state, string note)
@@ -643,7 +644,7 @@ namespace WorkBuddyLauncher
                 {
                     _wait = WaitKind.None;
                     SetState(ProjectState.Running, null);
-                    AppendLog("[OK] 服务已就绪：" + AddressUrl());
+                    AppendLog("[OK] 服务已就绪：" + AddressUrl() + (EnvConfig.IsWildcard(_currentHost) ? "（监听所有网卡，局域网可访问）" : ""));
                     if (_openBrowserOnHealthy)
                     {
                         _openBrowserOnHealthy = false;

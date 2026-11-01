@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -109,6 +109,18 @@ namespace WorkBuddyLauncher
         ///   · `localhost` / 空 → 127.0.0.1
         ///   · 其余 IPv6 地址   → 加方括号（URL 与 HttpWebRequest 的要求）
         ///   · 其余 IPv4 地址   → 原样
+        /// <summary>
+        /// 监听地址是否属于「所有网卡」的通配写法。
+        ///
+        /// 用来把界面上的本机地址补一句「监听所有网卡」——否则用户看到
+        /// `http://127.0.0.1:7864/` 会以为 0.0.0.0 没生效（issue #368 的现场）。
+        /// </summary>
+        public static bool IsWildcard(string host)
+        {
+            string bare = StripBrackets((host ?? string.Empty).Trim());
+            return bare == "0.0.0.0" || bare == "*" || bare == "::" || bare == "::0";
+        }
+
         public static string ToConnectHost(string host)
         {
             host = (host ?? string.Empty).Trim();

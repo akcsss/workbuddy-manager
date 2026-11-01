@@ -870,6 +870,12 @@ export default function DashboardPage() {
                           borderRadius: 12,
                           fontSize: 12,
                         }}
+                        /* 与柱状图同一口径：Recharts 默认把原始浮点数直接塞进提示框，
+                           支出是 usage.credit 的累加，会显示成 10 位小数（issue #365）。 */
+                        formatter={(value, name) => {
+                          const n = Number(value);
+                          return [fmtNumber(n), String(name)] as [string, string];
+                        }}
                       />
                       <Legend wrapperStyle={{fontSize: 11}} />
                       <Line yAxisId="inc" type="monotone" dataKey="income"

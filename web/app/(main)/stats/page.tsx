@@ -547,7 +547,7 @@ export default function StatsPage() {
                   {upstream.models?.map((m, i) => (
                     <TableRow key={`${m.model}-${i}`} className="border-b border-border/40">
                       <TableCell className="pl-0">
-                        <span className="max-w-[220px] truncate text-xs font-medium">{m.model || t('metric.unknown')}</span>
+                        <span className="max-w-[220px] truncate text-xs font-medium" title={m.model || undefined}>{m.model || t('metric.unknown')}</span>
                       </TableCell>
                       <TableCell className="text-xs tabular-nums">{fmtNumber(m.requests)}</TableCell>
                       <TableCell className="text-xs tabular-nums">{fmtCompact(m.total_tokens)}</TableCell>
@@ -626,7 +626,7 @@ function BreakdownPanel({
                   <TableCell className="pl-0">
                     <div className="flex items-center gap-2">
                       <span className="h-2 w-2 rounded-full" style={{background: CHART_COLORS[i % CHART_COLORS.length]}} />
-                      <span className="max-w-[140px] truncate text-xs font-medium">{it.name || t('metric.unknown')}</span>
+                      <span className="max-w-[140px] truncate text-xs font-medium" title={it.name || undefined}>{it.name || t('metric.unknown')}</span>
                     </div>
                     <div className="mt-1.5 h-1 w-full max-w-[140px] overflow-hidden rounded-full bg-border">
                       <div

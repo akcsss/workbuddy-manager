@@ -22,6 +22,9 @@ function Convert-WindowsEnvContent([string]$content) {
     $lines = @($content -split "`r?`n")
 
     # 只把仓库模板里的 Linux 默认值迁成当前安装目录路径；用户自定义值不改。
+    # WB_MANAGER_HOST 也属于用户设置：模板默认已是 127.0.0.1，启动器里改成
+    # 0.0.0.0（局域网访问）是明确意图，**不能**在每次启动时被重置回环（issue #368：
+    # 保存后偶尔生效、重启/开机自启后又变回 127.0.0.1，就是这里无条件改写造成的）。
     # 兼容 /opt/...、opt/...、\\opt\\... 等旧文件实际可能出现的写法。
     $pathDefaults = @{
         'WB_AUTH_DIR' = @('/opt/workbuddy2api/auths', "$rootSlash/upstream/auths")
@@ -64,9 +67,6 @@ function Convert-WindowsEnvContent([string]$content) {
             $changed = $true
         } elseif ($key -eq 'WB2API_MODE' -and $value.ToLowerInvariant() -eq 'docker' -and $hasLinuxUpstreamDefault) {
             $lines[$i] = 'WB2API_MODE=native'
-            $changed = $true
-        } elseif ($key -eq 'WB_MANAGER_HOST' -and $value -eq '0.0.0.0') {
-            $lines[$i] = 'WB_MANAGER_HOST=127.0.0.1'
             $changed = $true
         } elseif ($key -eq 'WB_SECURE_COOKIE' -and $value -eq 'auto') {
             $lines[$i] = 'WB_SECURE_COOKIE=false'

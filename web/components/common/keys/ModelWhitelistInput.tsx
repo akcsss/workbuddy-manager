@@ -2,7 +2,7 @@
 
 import {useMemo, useState} from 'react';
 import {Check, ChevronsUpDown, Search, X} from 'lucide-react';
-import {modelApi} from '@/lib/api';
+import {accountApi, modelApi} from '@/lib/api';
 import type {CatalogModel} from '@/lib/types';
 import type {Realm} from '@/lib/realm-context';
 import {useT} from '@/lib/i18n/provider';
@@ -57,7 +57,7 @@ export function ModelWhitelistInput({
   const [draft, setDraft] = useState('');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [catalog, setCatalog] = useState<{cn: CatalogModel[]; global: CatalogModel[]} | null>(null);
+  const [catalog, setCatalog] = useState<{cn: CatalogModel[]; global: CatalogModel[]; realms: Set<Realm> | null} | null>(null);
   /** 只看上游标注为「限时免费」的模型（issue #208）；tags 缺失时按不在免费目录处理 */
   const [freeOnly, setFreeOnly] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -84,11 +84,17 @@ export function ModelWhitelistInput({
     try {
       // 用模型目录而不是 /api/models：只有目录条目带 tags（含「限时免费」），
       // 白名单的免费筛选依赖它。目录有后端缓存，打开弹窗时拉一次即可。
-      const [cn, global] = await Promise.all([
+      const [cn, global, accounts] = await Promise.all([
         modelApi.catalog('cn'),
         modelApi.catalog('global'),
+        // 没有配置国际版账号时，选择器里不该冒出一堆用不了的国际版模型
+        // （issue #364）。账号列表取不到就退回「两组都显示」，不挡住手输。
+        accountApi.list().catch(() => null),
       ]);
-      setCatalog({cn: cn.models, global: global.models});
+      const realms = accounts
+        ? new Set<Realm>(accounts.accounts.map((a) => (a.realm === 'global' ? 'global' : 'cn')))
+        : null;
+      setCatalog({cn: cn.models, global: global.models, realms});
     } catch {
       setFailed(true);
     }
@@ -98,8 +104,11 @@ export function ModelWhitelistInput({
   const isFree = (m: CatalogModel) => (m.tags || []).some((tag) => tag.includes('免费'));
   const groups: {key: Realm; label: string; models: CatalogModel[]}[] = [];
   if (catalog) {
-    groups.push({key: 'cn', label: t('realm.cn'), models: catalog.cn});
-    groups.push({key: 'global', label: t('realm.global'), models: catalog.global});
+    const hasAccounts = (r: Realm) => !catalog.realms || catalog.realms.has(r);
+    if (hasAccounts('cn')) groups.push({key: 'cn', label: t('realm.cn'), models: catalog.cn});
+    if (hasAccounts('global')) {
+      groups.push({key: 'global', label: t('realm.global'), models: catalog.global});
+    }
     // 排序要就地进行：写成 `[...].sort(...)` 会让 TS 把字面量的 key 推宽成 string，
     // 整个数组就不再是声明的那个类型（tsc 报过）。
     groups.sort((a, b) => (a.key === realm ? -1 : b.key === realm ? 1 : 0));
