@@ -84,6 +84,20 @@ class AccountRiskTest(unittest.TestCase):
         self.assertTrue(item['historical'])
         self.assertFalse(item['paused'])
 
+    def test_new_live_failure_after_enable_is_not_hidden_by_same_second_dedup(self):
+        async def pause(uid, disabled, reason, **kwargs):
+            self.pool['accounts'][0].update(manual_disabled=disabled, manual_reason=reason)
+            return True, '', 'ok'
+        with mock.patch.object(accountrisk.time, 'time', return_value=self.now), \
+             mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock(side_effect=pause)) as action:
+            self.assertTrue(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
+            item = asyncio.run(accountrisk.warnings())['items'][0]
+            accountrisk.acknowledge(item['id'])
+            self.pool['accounts'][0].update(manual_disabled=False, manual_reason='')
+            self.assertTrue(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
+            self.assertEqual(action.await_count, 2)
+            self.assertFalse(asyncio.run(accountrisk.warnings())['items'][0]['acknowledged'])
+
     def test_model_quota_not_classified_and_server_error_only_warns(self):
         self.assertIsNone(accountrisk.classify_task({'kind': 'chat', 'message': '6004 model quota exhausted'}))
         self.assertIsNone(accountrisk.classify_task({'kind': 'chat', 'message': 'upstream soft_rate (http 429)'}))

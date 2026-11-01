@@ -126,7 +126,12 @@ async def pause_refresh(uid: str, directory: Path | str | None, *, ts: int | Non
         return False
     ident, inserted = record(directory, account, 'token_refresh', 429, now)
     if not inserted:
-        return await paused(uid, directory)
+        already_paused = await paused(uid, directory)
+        if already_paused or ts is not None:
+            return already_paused
+        # A new live attempt after explicit enable can fail in the same second.
+        # Deduplicate replayed log events, not a genuinely new refresh response.
+        db.execute('UPDATE account_risk_events SET acknowledged=0, action_error=? WHERE id=?', ('', ident))
     group = _group(directory)
     if group is None:
         db.execute('UPDATE account_risk_events SET action_error=? WHERE id=?', ('group_unavailable', ident))
