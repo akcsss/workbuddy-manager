@@ -21,6 +21,7 @@ from ..services import (
     tencent, wb2api,
 )
 from ..services.realm import realm_of, supports_checkin
+from ..services import taskpacing
 
 logger = logging.getLogger('workbuddy.accounts')
 
@@ -1318,7 +1319,12 @@ async def checkin_all(upstream_id: int | None = Query(None),
         db.add_checkin_log(uid, nickname, 'manual-batch', ok, code, message)
         return {'nickname': nickname, 'ok': ok, 'code': code, 'message': message}
 
-    results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
+    results = await taskpacing.run_accounts(
+        'checkin', accounts, one,
+        needs_request=lambda a: (a.get('uid') not in done_today
+                                 and a.get('checkin_supported') is not False
+                                 and not a.get('invalid_reason')),
+    )
     # 两类账号都不进 `total` 分母，各自单独报数：
     #   · skipped：国际版没有签到体系，既不会成功也不是失败。算进 total 会显示成
     #     「5/6 成功」，用户以为漏签了一个号、反复去点——而它永远是「已跳过」。
@@ -2159,7 +2165,10 @@ async def claim_compensation_all(upstream_id: int | None = Query(None),
             status, credit, message = await tencent.claim_compensation(self_auth, realm)
         return {'nickname': nickname, 'status': status, 'credit': credit, 'message': message}
 
-    results = await asyncio.gather(*(one(a) for a in accounts)) if accounts else []
+    results = await taskpacing.run_accounts(
+        'compensation', accounts, one,
+        needs_request=lambda a: supports_checkin(realm_of(a)) and not a.get('invalid_reason'),
+    )
     # 分母只算**真的发了请求**的账号：already / skipped 既不是成功也不是失败，
     # 算进 total 会让界面显示成「5/6 成功」，用户以为有个号没领到（与签到同口径）。
     tried = [r for r in results if r['status'] in ('claimed', 'nothing', 'failed')]

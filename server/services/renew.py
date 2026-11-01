@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 
 from .. import db, upstreamsvc
+from . import taskpacing
 from . import tencent, wb2api
 from .errtext import err_text
 
@@ -131,6 +132,7 @@ async def refresh_all(force: bool = False, now: int | None = None) -> dict:
     得不偿失（上游保活也是串行）。分组（多账号池）登记的目录一并巡检。
     """
     stats = {'checked': 0, 'renewed': 0, 'failed': 0, 'skipped': 0}
+    pacer = taskpacing.AccountPacer('keepalive')
     for base_dir, acct in _iter_accounts():
         # 面板停用（改名）的账号不续期：它已退出账号池，用户明确表示不用它。
         # 但**状态位停用（manual_disabled）要照常续期**——那条路的语义是
@@ -140,6 +142,7 @@ async def refresh_all(force: bool = False, now: int | None = None) -> dict:
             continue
         if not force and not _needs_renew(int(acct.get('expires_at') or 0), now):
             continue
+        await pacer.wait()
         stats['checked'] += 1
         name = acct['file']
         # 日志与限频用的标签：不同分组的同名文件要区分开，否则两组的同名账号
@@ -340,7 +343,8 @@ async def _loop() -> None:
     await asyncio.sleep(30)
     while True:
         try:
-            stats = await renew_once()
+            with taskpacing.scheduled_execution():
+                stats = await renew_once()
             if any(stats[k] for k in ('renewed', 'failed')):
                 logger.info('token 续期巡检：%s', stats)
         except asyncio.CancelledError:
@@ -354,7 +358,8 @@ async def _loop() -> None:
             if plan_is_due(plan):
                 logger.info('令牌刷新计划触发（每 %d 天，%02d 点档）',
                             plan['interval_days'], plan['hour'])
-                pstats = await refresh_all(force=True)
+                with taskpacing.scheduled_execution():
+                    pstats = await refresh_all(force=True)
                 mark_plan_ran()
                 _record_plan(pstats)
                 logger.info('令牌刷新计划完成：%s', pstats)
