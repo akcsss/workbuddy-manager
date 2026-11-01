@@ -179,6 +179,19 @@ export const authApi = {
 const groupQs = (upstreamId?: number | null): string =>
   upstreamId == null ? '' : `?upstream_id=${encodeURIComponent(String(upstreamId))}`;
 
+export interface AccountRiskEvent {
+  id: string; uid: string; nickname: string; group: string; realm: string;
+  operation: string; http_status: number; ts: number; historical: boolean;
+  acknowledged: boolean; paused: boolean | null; action_error: string;
+}
+
+export const accountRiskApi = {
+  list: (realm: string, upstreamId: number | null = null, allGroups = false) =>
+    get<{items: AccountRiskEvent[]; failed_groups: string[]}>('/api/account-risk',
+      {realm, upstream_id: upstreamId ?? undefined, all_groups: allGroups}),
+  acknowledge: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/acknowledge`),
+};
+
 export const accountApi = {
   proxies: () => get<{routes: string[]; default: string}>('/api/proxies'),
   /** 上游「账号管理接口」（admin.enabled）开关状态；供解禁队列判断能否真的解封。

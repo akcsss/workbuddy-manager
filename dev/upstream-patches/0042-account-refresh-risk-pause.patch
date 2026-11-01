@@ -1,0 +1,325 @@
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -136,6 +136,12 @@
+ 	}
+ 
+ 	up := upstream.New()
++	up.RefreshPaused = p.RiskPaused
++	up.OnRefreshRateLimit = func(uid string, retryAfter time.Duration) {
++		if p.PauseRefreshRateLimited(uid, retryAfter) {
++			log.Printf("WARN: account-risk uid=%s operation=token_refresh status=429 action=paused", uid)
++		}
++	}
+ 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
+ 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+ 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
+diff --git a/internal/pool/risk.go b/internal/pool/risk.go
+new file mode 100644
+--- /dev/null
++++ b/internal/pool/risk.go
+@@ -0,0 +1,31 @@
++package pool
++
++import (
++	"fmt"
++	"strings"
++	"time"
++)
++
++// RiskPausePrefix marks an operational safety pause, never an upstream ban.
++const RiskPausePrefix = "account-risk: "
++
++func (p *Pool) RiskPaused(uid string) bool {
++	p.mu.RLock()
++	defer p.mu.RUnlock()
++	e := p.byUID[uid]
++	return e != nil && e.manualDisabled && strings.HasPrefix(e.manualReason, RiskPausePrefix)
++}
++
++// PauseRefreshRateLimited does not overwrite an operator's existing pause or a
++// system ban. The existing persisted manual flag also blocks fallback selection.
++func (p *Pool) PauseRefreshRateLimited(uid string, retryAfter time.Duration) bool {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	e := p.byUID[uid]
++	if e == nil || e.disabled || e.manualDisabled {
++		return false
++	}
++	reason := fmt.Sprintf("%stoken_refresh HTTP 429 at=%s retry_after_sec=%d; manual review required", RiskPausePrefix, time.Now().UTC().Format(time.RFC3339), int64(retryAfter.Seconds()))
++	p.setManualDisabledLocked(e, true, reason)
++	return true
++}
+diff --git a/internal/pool/risk_test.go b/internal/pool/risk_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/pool/risk_test.go
+@@ -0,0 +1,46 @@
++package pool
++
++import (
++	"testing"
++	"time"
++	"workbuddy2api/internal/auth"
++)
++
++func TestRiskPauseIsAccountScopedAndRequiresExplicitEnable(t *testing.T) {
++	p := New("")
++	defer p.Close()
++	p.Add(&auth.Auth{UID: "bad"})
++	p.Add(&auth.Auth{UID: "good"})
++	if !p.PauseRefreshRateLimited("bad", time.Minute) || !p.RiskPaused("bad") {
++		t.Fatal("missing pause")
++	}
++	if p.RiskPaused("good") {
++		t.Fatal("unrelated account paused")
++	}
++	p.ReenableIfCredits("bad", 100)
++	p.ReviveDisabled("bad")
++	if !p.RiskPaused("bad") {
++		t.Fatal("automatic recovery cleared risk pause")
++	}
++	if p.PauseRefreshRateLimited("bad", time.Minute) {
++		t.Fatal("duplicate pause changed state")
++	}
++	p.SetManualDisabled("bad", false, "")
++	if p.RiskPaused("bad") {
++		t.Fatal("explicit enable did not clear pause")
++	}
++}
++
++func TestRiskPausePreservesOperatorIntent(t *testing.T) {
++	p := New("")
++	defer p.Close()
++	p.Add(&auth.Auth{UID: "u"})
++	p.SetManualDisabled("u", true, "operator pause")
++	if p.PauseRefreshRateLimited("u", 0) {
++		t.Fatal("overwrote operator pause")
++	}
++	_, reason, _ := p.ManualDisabledState("u")
++	if reason != "operator pause" {
++		t.Fatal(reason)
++	}
++}
+diff --git a/internal/upstream/client.go b/internal/upstream/client.go
+--- a/internal/upstream/client.go
++++ b/internal/upstream/client.go
+@@ -726,7 +726,10 @@
+ 
+ // Client 上游 HTTP 客户端。Base 字段可覆盖便于测试。
+ type Client struct {
+-	HTTP *http.Client
++	// Account-scoped token refresh protection; configured once before serving.
++	RefreshPaused      func(uid string) bool
++	OnRefreshRateLimit func(uid string, retryAfter time.Duration)
++	HTTP               *http.Client
+ 
+ 	// ChatHTTP 聊天 SSE 专用 client：无总时长上限（Timeout=0），首字节由
+ 	// Transport.ResponseHeaderTimeout 约束，流中空闲由 IdleTimeout 约束。
+@@ -1094,6 +1097,9 @@
+ //   - 写回前重新校验快照一致性：若锁外期间另一 goroutine 已完成刷新（refreshToken
+ //     已变），本次结果直接采用（新 token 已生效），不再重复写回。
+ func (c *Client) RefreshToken(a *auth.Auth) error {
++	if c.RefreshPaused != nil && c.RefreshPaused(a.UID) {
++		return &Error{Kind: ErrSoftRate, Status: http.StatusTooManyRequests, Msg: "account-risk: token refresh paused; review account warning before enabling"}
++	}
+ 	// 第 1 段（锁内）：读快照。
+ 	a.Lock()
+ 	rtSnapshot := a.RefreshToken
+@@ -1130,6 +1136,10 @@
+ 	// 网络 I/O（锁外，30s 上限）。
+ 	data, err := c.doJSON(&hdrSnapshot, req)
+ 	if err != nil {
++		var upstreamErr *Error
++		if errors.As(err, &upstreamErr) && upstreamErr.Status == http.StatusTooManyRequests && c.OnRefreshRateLimit != nil {
++			c.OnRefreshRateLimit(a.UID, upstreamErr.RetryAfter)
++		}
+ 		return err
+ 	}
+ 	var tok struct {
+diff --git a/internal/upstream/refresh_risk_test.go b/internal/upstream/refresh_risk_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/upstream/refresh_risk_test.go
+@@ -0,0 +1,38 @@
++package upstream
++
++import (
++	"net/http"
++	"testing"
++	"time"
++	"workbuddy2api/internal/auth"
++)
++
++func TestRefresh429PausesAndPreventsFurtherNetworkRequests(t *testing.T) {
++	calls, paused := 0, false
++	c := testClient(func(r *http.Request) (*http.Response, error) {
++		calls++
++		return jsonResp(429, `{"error_msg":"Too Many Requests"}`), nil
++	})
++	c.RefreshPaused = func(uid string) bool { return paused && uid == "u" }
++	c.OnRefreshRateLimit = func(uid string, _ time.Duration) {
++		if uid != "u" {
++			t.Fatal(uid)
++		}
++		paused = true
++	}
++	a := &auth.Auth{UID: "u", AccessToken: "at", RefreshToken: "rt"}
++	if c.RefreshToken(a) == nil || !paused {
++		t.Fatal("429 did not pause")
++	}
++	if c.RefreshToken(a) == nil || calls != 1 {
++		t.Fatalf("paused account sent %d requests", calls)
++	}
++}
++
++func TestRefresh500DoesNotPauseAccount(t *testing.T) {
++	c := testClient(func(r *http.Request) (*http.Response, error) { return jsonResp(500, `{"code":500}`), nil })
++	c.OnRefreshRateLimit = func(string, time.Duration) { t.Fatal("server error was treated as account restriction") }
++	if c.RefreshToken(&auth.Auth{UID: "u", RefreshToken: "rt"}) == nil {
++		t.Fatal("expected error")
++	}
++}
+diff --git a/internal/scheduler/scheduler.go b/internal/scheduler/scheduler.go
+--- a/internal/scheduler/scheduler.go
++++ b/internal/scheduler/scheduler.go
+@@ -506,7 +506,7 @@
+ 	}
+ 	for _, st := range statuses {
+ 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
+-		if st.Disabled {
++		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
+ 			oc.Status, oc.Detail = CheckinSkipped, "disabled"
+ 			skipN++
+ 			out = append(out, oc)
+@@ -657,7 +657,7 @@
+ 	count := s.cfg.ActivityReportCount
+ 	first := true
+ 	for _, st := range s.cfg.Pool.List() {
+-		if st.Disabled {
++		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
+ 			continue
+ 		}
+ 		a := s.cfg.Pool.AuthByUID(st.UID)
+@@ -895,13 +895,19 @@
+ func (s *Scheduler) RunKeepaliveNow() { s.runKeepalive(context.Background()) }
+ 
+ func (s *Scheduler) runKeepalive(ctx context.Context) {
++	checked, okN, failed, skipped := 0, 0, 0, 0
++	defer func() {
++		log.Printf("keepalive done: checked=%d ok=%d failed=%d skipped=%d", checked, okN, failed, skipped)
++	}()
+ 	first := true
+ 	for _, st := range s.cfg.Pool.List() {
+-		if st.Disabled {
++		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
++			skipped++
+ 			continue
+ 		}
+ 		a := s.cfg.Pool.AuthByUID(st.UID)
+ 		if a == nil || a.RefreshTokenValue() == "" {
++			skipped++
+ 			continue
+ 		}
+ 		if !first && !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+@@ -911,7 +917,9 @@
+ 			return
+ 		}
+ 		first = false
++		checked++
+ 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
++			failed++
+ 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+ 			var ue *upstream.Error
+ 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+@@ -921,6 +929,8 @@
+ 			}
+ 			continue
+ 		}
++		okN++
++		log.Printf("keepalive %s: ok", logfmt.Label(st.UID, st.Nickname))
+ 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
+ 		a.BackfillRealm()                   // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
+ 		if err := a.SaveAtomic(); err != nil {
+diff --git a/internal/scheduler/school.go b/internal/scheduler/school.go
+--- a/internal/scheduler/school.go
++++ b/internal/scheduler/school.go
+@@ -108,6 +108,14 @@
+ func (s *Scheduler) RunSchoolNow() { s.runSchool(context.Background()) }
+ 
+ func (s *Scheduler) runSchool(ctx context.Context) {
++	if s.cfg.Pool != nil {
++		for _, account := range s.cfg.Pool.List() {
++			if s.cfg.Pool.RiskPaused(account.UID) {
++				log.Printf("scheduled school skipped: account safety pause; select a healthy account for individual tasks")
++				return
++			}
++		}
++	}
+ 	root := repoRoot()
+ 	runScriptContext(ctx, "school", root, [][]string{
+ 		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}),
+@@ -120,6 +128,14 @@
+ func (s *Scheduler) RunCatNow() { s.runCat(context.Background()) }
+ 
+ func (s *Scheduler) runCat(ctx context.Context) {
++	if s.cfg.Pool != nil {
++		for _, account := range s.cfg.Pool.List() {
++			if s.cfg.Pool.RiskPaused(account.UID) {
++				log.Printf("scheduled cat skipped: account safety pause; select a healthy account for individual tasks")
++				return
++			}
++		}
++	}
+ 	root := repoRoot()
+ 	runScriptContext(ctx, "cat", root, [][]string{
+ 		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"}),
+diff --git a/internal/scheduler/travel.go b/internal/scheduler/travel.go
+--- a/internal/scheduler/travel.go
++++ b/internal/scheduler/travel.go
+@@ -72,7 +72,7 @@
+ func (s *Scheduler) runTravel(ctx context.Context) {
+ 	first := true
+ 	for _, st := range s.cfg.Pool.List() {
+-		if st.Disabled {
++		if st.Disabled || s.cfg.Pool.RiskPaused(st.UID) {
+ 			continue
+ 		}
+ 		a := s.cfg.Pool.AuthByUID(st.UID)
+diff --git a/internal/scheduler/risk_test.go b/internal/scheduler/risk_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/scheduler/risk_test.go
+@@ -0,0 +1,32 @@
++package scheduler
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++	"workbuddy2api/internal/auth"
++	"workbuddy2api/internal/pool"
++	"workbuddy2api/internal/upstream"
++)
++
++func TestRiskPausedAccountIsSkippedByNativeBackgroundTasks(t *testing.T) {
++	calls := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls++
++		w.WriteHeader(500)
++	}))
++	defer server.Close()
++	p := pool.New("")
++	defer p.Close()
++	p.Add(&auth.Auth{UID:"paused", AccessToken:"at", RefreshToken:"rt", ExpiresAt:time.Now().Add(24*time.Hour).Unix()})
++	p.PauseRefreshRateLimited("paused", 0)
++	up := upstream.New()
++	up.ChatBaseCN, up.BillingBaseCN = server.URL, server.URL
++	s := New(Config{Pool:p, Upstream:up})
++	s.RunCheckinNow()
++	s.RunKeepaliveNow()
++	s.RunActivityNow()
++	s.RunTravelNow()
++	if calls != 0 { t.Fatalf("paused account made %d background requests", calls) }
++}

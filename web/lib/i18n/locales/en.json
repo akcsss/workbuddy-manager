@@ -1,4 +1,25 @@
 {
+  "risk": {
+    "pausedCount": "Currently safety-paused: {n}",
+    "noNewPauses": "These are historical or recovered events. No accounts are currently safety-paused by these warnings.",
+    "acknowledged": "Warnings acknowledged. No account pause state was changed.",
+    "title": "Account safety warnings",
+    "count": "{n} affected accounts",
+    "acknowledge": "Acknowledge warnings",
+    "explanation": "A token-refresh HTTP 429 triggers a safety pause for that account. Ordinary model quota limits do not. A safety pause is not a ban and does not stop other accounts.",
+    "loadFailed": "Warnings or pause state could not be confirmed. Please retry.",
+    "details": "View accounts, operations and times",
+    "paused": "Safety paused",
+    "unknown": "Pause state unknown",
+    "historical": "Historical record (no automatic pause)",
+    "warning": "Warning",
+    "refresh": "Token refresh",
+    "background": "Background task",
+    "pauseFailed": "Automatic pause failed or is unconfirmed. Check account status.",
+    "recovery": "Acknowledging does not resume accounts. Review the cause and enable the account manually; signing in again does not clear this protection.",
+    "accounts": "Open accounts"
+  },
+
   "language": {
     "switch": "Switch language"
   },

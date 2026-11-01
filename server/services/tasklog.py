@@ -329,6 +329,11 @@ def parse_line(line: str) -> dict | None:
     # 形态 3：每轮汇总（先判，避免 `checkin done:` 被当成 uid=done）
     m = _SUMMARY_LINE.search(body)
     if m and m.group(2):
+        if m.group(2) == 'keepalive':
+            counts = dict(re.findall(r'(checked|ok|failed|skipped)=(\d+)', m.group(3)))
+            return _event(ts, 'keepalive', '', 'warn' if int(counts.get('failed', 0)) else 'ok', 0,
+                          '本轮保活：尝试 {checked}，成功 {ok}，失败 {failed}，跳过 {skipped}'.format(
+                              **{key: counts.get(key, '0') for key in ('checked', 'ok', 'failed', 'skipped')}))
         return _parse_checkin_summary(ts, m.group(3).strip())
 
     # 形态 4：计划阶段跳过
@@ -556,6 +561,8 @@ async def _collect_once(limit: int = TAIL_LINES) -> tuple[int, int]:
     if not events:
         return 0, 0
     added = await asyncio.to_thread(db.add_task_logs, events)
+    from . import accountrisk
+    await accountrisk.handle_tasks(events)
     return len(events), added
 
 

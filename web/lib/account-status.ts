@@ -291,7 +291,7 @@ export function availabilityLabelKey(tier: AvailabilityTier, a?: Account): strin
     case 'disabledByPanel':
       return 'accounts.badgeDisabledByPanel';
     case 'manualDisabled':
-      return 'accounts.badgeManualDisabled';
+      return a?.manual_reason?.startsWith('account-risk: ') ? 'risk.paused' : 'accounts.badgeManualDisabled';
     case 'expired':
       return 'accounts.badgeExpired';
     case 'unknown':
@@ -324,7 +324,7 @@ export function availabilityTitleKey(tier: AvailabilityTier, a?: Account): strin
     case 'disabledByPanel':
       return 'accounts.badgeDisabledByPanelTitle';
     case 'manualDisabled':
-      return 'accounts.badgeManualDisabledTitle';
+      return a?.manual_reason?.startsWith('account-risk: ') ? 'risk.explanation' : 'accounts.badgeManualDisabledTitle';
     // 系统自动禁用（12153 连败 / 11140 被封）必须给出**下一步**：只说「已禁用」
     // 用户不知道能做什么。点「启用」现在会连同系统禁用位一起解除（面板会调上游
     // 的 revive 端点）——这一点以前不成立，所以老提示只能写「重新登录」。

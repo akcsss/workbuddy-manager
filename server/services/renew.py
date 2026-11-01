@@ -52,7 +52,7 @@ import logging
 import time
 from pathlib import Path
 
-from .. import db, upstreamsvc
+from .. import config, db, upstreamsvc
 from . import tencent, wb2api
 from .errtext import err_text
 
@@ -152,6 +152,7 @@ async def refresh_all(force: bool = False, now: int | None = None) -> dict:
             stats['failed'] += 1
             continue
         payload = _account_payload(raw)
+        payload['_risk_auth_dir'] = str(base_dir or config.AUTH_DIR)
         if not payload['refresh_token']:
             # 没有 refreshToken 就是真的续不了（要么重新扫码，要么它本就只有
             # 一个长期令牌）。记一次日志，别静默——用户看任务记录能明白原因。
