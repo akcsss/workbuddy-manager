@@ -66,6 +66,7 @@ import {cn} from '@/lib/utils';
 import {PageHeader} from '@/components/common/layout/PageHeader';
 import {StatCard, type StatTone} from '@/components/common/layout/StatCard';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
+import {AccountRiskWarnings} from '@/components/common/accounts/AccountRiskWarnings';
 import {EmptyState} from '@/components/common/layout/EmptyState';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
@@ -351,7 +352,7 @@ export default function DashboardPage() {
   /** 可用性分档的汇总（只统计「能正常调用」的，与账号页说法一致） */
   const availability = useMemo(() => {
     const counts: Record<AvailabilityTier, number> = {
-      disabled: 0, disabledByPanel: 0, manualDisabled: 0, expired: 0, unknown: 0, cooling: 0,
+      disabled: 0, disabledByPanel: 0, manualDisabled: 0, riskPaused: 0, expired: 0, unknown: 0, cooling: 0,
       neverSucceeded: 0, notLoaded: 0, online: 0,
     };
     for (const a of scoped) counts[availabilityOf(a)] += 1;
@@ -482,6 +483,7 @@ export default function DashboardPage() {
   return (
     <div className="flex flex-col gap-4 md:gap-6" aria-busy={isRefreshing}>
       {header}
+      <AccountRiskWarnings allGroups />
 
       {/* 统计范围。**只在多于一个分组时才出现**：单分组时它只是句废话，
           而绝大多数部署就是单分组。有了它，用户才知道上面那些数是全池的，

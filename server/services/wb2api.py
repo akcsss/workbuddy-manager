@@ -351,6 +351,7 @@ def merge_pool_status(accounts: list[dict], status: dict) -> list[dict]:
         # 这个是运维主动摘的，前者可 revive、后者该 enable。上游对叠加态
         # 两个字段分别透出，我们照搬，前端才能把「系统判定坏了」与
         # 「我主动摘的」分开说——合并成一个字段会互相覆盖（上游注释的原话）。
+        a['refresh_risk'] = p.get('refresh_risk')
         a['manual_disabled'] = bool(p.get('manual_disabled'))
         a['manual_reason'] = str(p.get('manual_reason') or '')
         # request illegal 表示上游账号封禁，重登无法解封；14017 只软冷却。
@@ -549,7 +550,7 @@ def _admin_route_missing(resp: object) -> bool:
 
 async def _admin_account_call(uid: str, action: str, *, reason: str = '',
                               base_url: str | None = None,
-                              api_key: str | None = None) -> tuple[bool, str, str, dict]:
+                              api_key: str | None = None, payload: dict | None = None) -> tuple[bool, str, str, dict]:
     """调上游的 `POST /admin/accounts/{uid}/{action}`，返回 (成功, 说明, 结果码, 回显)。
 
     三个 action（disable / enable / revive）的**错误语义完全一样**，所以只写一份；
@@ -577,7 +578,7 @@ async def _admin_account_call(uid: str, action: str, *, reason: str = '',
         return False, 'uid 为空', 'error', {}
     base = (base_url or config.WB2API_BASE).rstrip('/')
     url = f'{base}/admin/accounts/{uid}/{action}'
-    body: dict = {'reason': reason} if (action == 'disable' and reason) else {}
+    body: dict = payload if payload is not None else ({'reason': reason} if (action == 'disable' and reason) else {})
     try:
         async with config.http_client(10, connect=3) as client:
             resp = await client.post(url, json=body, headers=_auth_headers(api_key))
@@ -610,6 +611,14 @@ async def clear_model_block(uid: str, model: str, *, base_url: str | None = None
     ok, message, code, _ = await _admin_account_call(
         uid, action, base_url=base_url, api_key=api_key)
     return ok, message, code
+
+
+async def set_refresh_risk(uid: str, retry_after: int, **kwargs) -> tuple[bool, str, str, dict]:
+    return await _admin_account_call(uid, 'refresh-risk', payload={'retry_after_sec': retry_after}, **kwargs)
+
+
+async def clear_refresh_risk(uid: str, **kwargs) -> tuple[bool, str, str, dict]:
+    return await _admin_account_call(uid, 'refresh-risk/clear', **kwargs)
 
 
 async def set_manual_disabled(uid: str, disabled: bool, reason: str = '',

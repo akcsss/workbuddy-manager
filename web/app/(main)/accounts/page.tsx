@@ -69,6 +69,7 @@ import {ConfirmDialog} from '@/components/common/layout/ConfirmDialog';
 import {LoadError} from '@/components/common/states/LoadError';
 import {SkeletonBar} from '@/components/common/states/SkeletonBar';
 import {AddAccountDialog} from '@/components/common/accounts/AddAccountDialog';
+import {AccountRiskWarnings} from '@/components/common/accounts/AccountRiskWarnings';
 import {UploadAccountsButton} from '@/components/common/accounts/UploadAccountsButton';
 import {CreditCountdown} from '@/components/common/accounts/CreditCountdown';
 import {AccountNoteDialog} from '@/components/common/accounts/AccountNoteDialog';
@@ -653,6 +654,9 @@ export default function AccountsPage() {
         </Badge>
       );
     }
+    if (tier === 'riskPaused') {
+      return <Badge variant="outline" className="rounded-full text-amber-600" title={t('risk.recovery')}>{label}</Badge>;
+    }
     if (tier === 'manualDisabled') {
       // 上游状态位停用（issue #45）：同样中性灰，但提示文案不同——这条是
       // 「还在池里、签到与保活照常」，与上一条「完全退出账号池」差别很大，
@@ -1186,6 +1190,7 @@ export default function AccountsPage() {
 
   return (
     <div className="flex flex-col gap-4 md:gap-6" aria-busy={isRefreshing}>
+      <AccountRiskWarnings upstreamId={groupId} />
       <PageHeader
         stacked
         title={t('accounts.title')}

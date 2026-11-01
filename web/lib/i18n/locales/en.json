@@ -1,4 +1,30 @@
 {
+  "risk": {
+    "pausedCount": "Currently safety-paused: {n}",
+    "noNewPauses": "These are historical or recovered events. No accounts are currently safety-paused by these warnings.",
+    "acknowledged": "Warnings acknowledged. No account pause state was changed.",
+    "title": "Account safety warnings",
+    "count": "{n} affected accounts",
+    "acknowledge": "Acknowledge warnings",
+    "explanation": "A token-refresh HTTP 429 pauses only that account. Model quotas and 11140 retain their own cooldown rules. A 429 alone does not prove a ban.",
+    "loadFailed": "Warnings or pause state could not be confirmed. Please retry.",
+    "details": "View accounts, operations and times",
+    "paused": "Refresh backoff",
+    "unknown": "Pause state unknown",
+    "historical": "Historical record (no automatic pause)",
+    "warning": "Warning",
+    "refresh": "Token refresh",
+    "background": "Background task",
+    "pauseFailed": "Automatic pause failed or is unconfirmed. Check account status.",
+    "recovery": "Retry-After is bounded to 5 minutes–6 hours (default 5 minutes). Expiry permits the next normal request. Three repeated 429s within 5 minutes of each expiry require review. Acknowledging is not resuming; clearing protection preserves manual stops, system disablement and other cooldowns.",
+    "accounts": "Open accounts",
+    "review": "Paused · review required",
+    "history": "Show acknowledged history",
+    "retryAt": "Next retry allowed:",
+    "resume": "Reviewed — clear protection",
+    "resumed": "Protection cleared; other restrictions preserved",
+    "repeatCount": "Rapid repeat throttles after expiry: {n}"
+  },
   "language": {
     "switch": "Switch language"
   },

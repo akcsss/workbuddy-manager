@@ -427,6 +427,10 @@ async def start_async(mode: str, target: str = 'ALL',
 
     `auth_dir` / `group_name` 用于多分组（issue #274）：不传 = 默认分组。
     """
+    from . import accountrisk
+    paused = await accountrisk.paused_targets(auth_dir)
+    if paused and (target == 'ALL' or any(uid.startswith(target) for uid in paused)):
+        return False, '账号存在保护性暂停；请改选正常账号单独执行，或检查预警后手动恢复'
     ok, payload = await asyncio.to_thread(_prepare, mode, target, auth_dir, group_name)
     if not ok:
         return False, payload  # type: ignore[return-value]
@@ -455,6 +459,12 @@ def start(mode: str, target: str = 'ALL',
 async def _run(argv: list[str], mode: str, target: str,
                auth_dir: str = '', group: str = '') -> None:
     """跑子进程并把输出累积到状态里（尾部保留）。"""
+    from . import accountrisk
+    paused = await accountrisk.paused_targets(auth_dir)
+    if paused and (target == 'ALL' or any(uid.startswith(target) for uid in paused)):
+        _state.update(running=False, finished_at=int(time.time()), exit_code=1,
+                      error='账号存在保护性暂停，未执行批量活动脚本')
+        return
     env = dict(os_environ())
     # 显式指定账号目录：脚本自身的回落顺序（WB2A_AUTHS > 仓库内 auths/ >
     # /root/...）不一定指向本面板管的那批文件，传错会「跑了个寂寞」还看不出来。
