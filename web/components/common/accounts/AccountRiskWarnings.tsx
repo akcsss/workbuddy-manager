@@ -19,15 +19,23 @@ export function AccountRiskWarnings({upstreamId = null, allGroups = false}: {
   const {realm} = useRealm();
   const {isAdmin} = useAuth();
   const t = useT();
+  const [history, setHistory] = useState(false);
   const [busy, setBusy] = useState(false);
-  const {values, errors, reload} = useAsyncAll({warnings: () => accountRiskApi.list(realm, upstreamId, allGroups)},
-    [realm, upstreamId, allGroups]);
+  const {values, errors, reload} = useAsyncAll({warnings: () => accountRiskApi.list(realm, upstreamId, allGroups, history)},
+    [realm, upstreamId, allGroups, history]);
   useHeartbeat(reload, 30000);
   const data = values.warnings;
   const failed = !!errors.warnings || !!data?.failed_groups?.length;
   const items = data?.items ?? [];
   const pausedCount = new Set(items.filter(x => x.paused === true).map(x => `${x.group}:${x.uid}`)).size;
-  if (!items.length && !failed) return null;
+  if (!items.length && !data?.total && !failed) return null;
+
+  async function resume(id: string) {
+    setBusy(true);
+    try { await accountRiskApi.resume(id); await reload(); notify.ok(t('risk.resumed')); }
+    catch (e) { notify.err(errText(e)); }
+    finally { setBusy(false); }
+  }
 
   async function acknowledge() {
     setBusy(true);
@@ -53,6 +61,7 @@ export function AccountRiskWarnings({upstreamId = null, allGroups = false}: {
       <p className="mt-2 text-xs leading-5 text-muted-foreground">{t('risk.explanation')}</p>
       {!failed && pausedCount === 0 && items.every(x => x.paused === false) && <p className="mt-2 text-xs font-medium">{t('risk.noNewPauses')}</p>}
       {failed && <p role="alert" className="mt-2 text-xs text-red-600">{t('risk.loadFailed')} <Button variant="link" size="sm" onClick={reload}>{t('state.retry')}</Button></p>}
+      <label className="mt-2 flex items-center gap-2 text-xs"><input type="checkbox" checked={history} onChange={e => setHistory(e.target.checked)} />{t('risk.history')}</label>
       <details className="mt-2" open={items.some(x => x.paused === true)}>
         <summary className="cursor-pointer text-xs font-medium">{t('risk.details')}</summary>
         <ul className="mt-2 max-h-72 space-y-2 overflow-y-auto">
@@ -61,9 +70,12 @@ export function AccountRiskWarnings({upstreamId = null, allGroups = false}: {
               <div className="flex flex-wrap items-center gap-x-2">
                 <span className="break-all font-medium">{item.nickname || item.uid}</span>
                 <span className="text-muted-foreground">{item.group}</span>
-                <strong>{t(item.paused === true ? 'risk.paused' : item.paused === null ? 'risk.unknown' : item.historical ? 'risk.historical' : 'risk.warning')}</strong>
+                <strong>{t(item.paused === true ? (item.needs_review ? 'risk.review' : 'risk.paused') : item.paused === null ? 'risk.unknown' : item.historical ? 'risk.historical' : 'risk.warning')}</strong>
               </div>
               <div>{t(item.operation === 'token_refresh' ? 'risk.refresh' : 'risk.background')} · HTTP {item.http_status} · {fmtDateTime(item.ts)}</div>
+              {item.paused === true && !item.needs_review && <div>{t('risk.retryAt')} {fmtDateTime(item.pause_until)}</div>}
+              {item.needs_review && <div>{t('risk.repeatCount', {n: item.failures})}</div>}
+              {isAdmin && item.paused === true && item.needs_review && <Button variant="outline" size="sm" disabled={busy} onClick={() => resume(item.id)}>{t('risk.resume')}</Button>}
               {item.action_error && <p className="text-red-600">{t('risk.pauseFailed')} ({item.action_error})</p>}
             </li>
           ))}

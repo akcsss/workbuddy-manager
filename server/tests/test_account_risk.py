@@ -56,157 +56,141 @@ class AccountRiskTest(unittest.TestCase):
         config.DB_PATH, config.AUTH_DIR, config.USERS_FILE = self.original
         self.temp.cleanup()
 
+    def risk(self, **kwargs):
+        return dict({'until':self.now+300, 'last_failure_at':self.now, 'failures':1,
+                     'needs_review':False, 'retry_after_sec':300, 'paused':True}, **kwargs)
+
     def event(self, **kwargs):
         return dict({'ts': self.now, 'uid': self.uid[:8], 'kind': 'keepalive',
                      'message': 'upstream soft_rate (http 429): Too Many Requests'}, **kwargs)
 
-    def test_auth_429_pauses_one_account_without_restart(self):
-        async def pause(uid, disabled, reason, **kwargs):
-            self.assertEqual(uid, self.uid)
-            self.pool['accounts'][0].update(manual_disabled=disabled, manual_reason=reason)
-            return True, '', 'ok'
-        with mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock(side_effect=pause)) as action, \
-             mock.patch.object(wb2api, 'restart_container') as restart:
+    async def apply_pause(self, uid, wait, **kwargs):
+        self.assertEqual(uid, self.uid)
+        self.pool['accounts'][0]['refresh_risk'] = self.risk(until=self.now+wait)
+        return True, '', 'ok', {'uid':uid, 'refresh_risk':self.pool['accounts'][0]['refresh_risk']}
+
+    def test_429_pauses_one_account_without_manual_state_or_restart(self):
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock(side_effect=self.apply_pause)) as action, \
+             mock.patch.object(wb2api, 'set_manual_disabled') as manual, mock.patch.object(wb2api, 'restart_container') as restart:
             asyncio.run(accountrisk.handle_tasks([self.event()]))
             asyncio.run(accountrisk.handle_tasks([self.event()]))
             action.assert_awaited_once()
-            restart.assert_not_called()
-        items = asyncio.run(accountrisk.warnings())['items']
-        self.assertEqual(len(items), 1)
-        self.assertTrue(items[0]['paused'])
-        self.assertNotIn('scope', items[0])
+            manual.assert_not_called(); restart.assert_not_called()
+        self.assertTrue(asyncio.run(accountrisk.warnings())['items'][0]['paused'])
 
-    def test_historical_failures_warn_without_pausing(self):
-        with mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock()) as action:
-            asyncio.run(accountrisk.handle_tasks([self.event(ts=self.now-86400)]))
-            action.assert_not_awaited()
-        item = asyncio.run(accountrisk.warnings())['items'][0]
-        self.assertTrue(item['historical'])
-        self.assertFalse(item['paused'])
-
-    def test_new_live_failure_after_enable_is_not_hidden_by_same_second_dedup(self):
-        async def pause(uid, disabled, reason, **kwargs):
-            self.pool['accounts'][0].update(manual_disabled=disabled, manual_reason=reason)
-            return True, '', 'ok'
-        with mock.patch.object(accountrisk.time, 'time', return_value=self.now), \
-             mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock(side_effect=pause)) as action:
-            self.assertTrue(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
-            item = asyncio.run(accountrisk.warnings())['items'][0]
-            accountrisk.acknowledge(item['id'])
-            self.pool['accounts'][0].update(manual_disabled=False, manual_reason='')
-            self.assertTrue(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
-            self.assertEqual(action.await_count, 2)
-            self.assertFalse(asyncio.run(accountrisk.warnings())['items'][0]['acknowledged'])
-
-    def test_model_quota_not_classified_and_server_error_only_warns(self):
-        self.assertIsNone(accountrisk.classify_task({'kind': 'chat', 'message': '6004 model quota exhausted'}))
-        self.assertIsNone(accountrisk.classify_task({'kind': 'chat', 'message': 'upstream soft_rate (http 429)'}))
-        with mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock()) as action:
-            asyncio.run(accountrisk.handle_tasks([self.event(kind='travel', message='claim: http 500 grant credits failed')]))
-            action.assert_not_awaited()
-        self.assertEqual(asyncio.run(accountrisk.warnings())['items'][0]['http_status'], 500)
-
-    def test_ambiguous_uid_prefix_never_pauses(self):
-        account = wb2api.list_auth_accounts()[0]
-        with mock.patch.object(wb2api, 'list_auth_accounts', return_value=[account, {**account, 'uid':self.uid[:8]+'-other'}]), \
-             mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock()) as action:
+    def test_native_callback_is_not_applied_again_from_logs(self):
+        self.pool['accounts'][0]['refresh_risk'] = self.risk()
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock()) as action:
             asyncio.run(accountrisk.handle_tasks([self.event()]))
             action.assert_not_awaited()
 
-    def test_no_admin_route_uses_file_pause_without_restart(self):
-        with mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock(return_value=(False, '', 'no_route'))):
-            self.assertTrue(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
-        self.assertTrue((config.AUTH_DIR / (self.filename+'.disabled')).is_file())
-        self.assertTrue(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
+    def test_expired_native_event_replay_does_not_repause(self):
+        self.pool['accounts'][0]['refresh_risk'] = self.risk(until=self.now-1)
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock()) as action:
+            asyncio.run(accountrisk.handle_tasks([self.event()]))
+            action.assert_not_awaited()
+        self.assertFalse(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
 
-    def test_keepalive_summary_retains_actual_attempt_denominator(self):
-        from server.services import tasklog
-        event = tasklog.parse_line('2026-11-01T01:00:00Z keepalive done: checked=49 ok=35 failed=14 skipped=0')
-        self.assertEqual(event['kind'], 'keepalive')
-        self.assertEqual(event['uid'], '')
-        self.assertIn('尝试 49，成功 35，失败 14', event['message'])
+    def test_historical_logs_only_warn(self):
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock()) as action:
+            asyncio.run(accountrisk.handle_tasks([self.event(ts=self.now-86400)]))
+            action.assert_not_awaited()
+        self.assertTrue(asyncio.run(accountrisk.warnings())['items'][0]['historical'])
 
-    def test_pause_failure_is_visible(self):
-        with mock.patch.object(wb2api, 'set_manual_disabled', new=mock.AsyncMock(return_value=(False, '', 'error'))):
-            self.assertFalse(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
-        self.assertEqual(asyncio.run(accountrisk.warnings())['items'][0]['action_error'], 'error')
+    def test_model_quota_and_500_only_warn(self):
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock()) as action:
+            asyncio.run(accountrisk.handle_tasks([self.event(kind='checkin', message='http 429 quota'),
+                self.event(kind='travel', message='http 500 grant credits failed')]))
+            action.assert_not_awaited()
+        self.assertEqual(len(asyncio.run(accountrisk.warnings())['items']), 2)
 
-    def test_acknowledging_never_resumes_and_active_warning_remains(self):
-        self.pool['accounts'][0].update(manual_disabled=True, manual_reason=accountrisk.PREFIX+'token_refresh HTTP 429')
-        item = asyncio.run(accountrisk.warnings())['items'][0]
-        self.assertTrue(accountrisk.acknowledge(item['id']))
-        self.assertTrue(asyncio.run(accountrisk.warnings())['items'][0]['paused'])
-        self.pool['accounts'][0].update(manual_disabled=False, manual_reason='')
+    def test_prefix_is_not_risk_state(self):
+        self.pool['accounts'][0].update(manual_disabled=True, manual_reason='account-risk: arbitrary operator reason')
+        self.assertFalse(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
         self.assertEqual(asyncio.run(accountrisk.warnings())['items'], [])
-        self.assertFalse(accountrisk.acknowledge('not-an-event'))
 
-    def test_warnings_survive_database_reopen_and_unknown_state(self):
-        account = wb2api.list_auth_accounts()[0]
-        ident, inserted = accountrisk.record(config.AUTH_DIR, account, 'token_refresh', 429, self.now)
-        self.assertTrue(inserted)
-        self.assertFalse(accountrisk.record(config.AUTH_DIR, account, 'token_refresh', 429, self.now)[1])
-        db._conn.close(); db._conn = None
-        self.pool = {'connected': False}
-        result = asyncio.run(accountrisk.warnings())
-        self.assertIsNone(result['items'][0]['paused'])
-        self.assertTrue(result['failed_groups'])
+    def test_cached_pause_expires_during_status_outage(self):
+        self.pool['accounts'][0]['refresh_risk'] = self.risk()
+        self.assertTrue(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
+        self.pool = {'connected':False}
+        with mock.patch.object(accountrisk.time, 'time', return_value=self.now+301):
+            self.assertFalse(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
 
-    def test_warning_scope_does_not_leak_to_another_group(self):
-        account = wb2api.list_auth_accounts()[0]
-        accountrisk.record(config.AUTH_DIR, account, 'token_refresh', 429, self.now)
-        other = {**upstreamsvc.default_upstream(), 'id':9, 'name':'other', 'auth_dir':str(self.root/'other')}
-        Path(other['auth_dir']).mkdir()
-        with mock.patch.object(upstreamsvc, 'get_upstream', return_value=other):
-            self.assertEqual(asyncio.run(accountrisk.warnings(group_id=9))['items'], [])
-
-    def test_confirmed_pause_survives_upstream_outage_until_confirmed_enable(self):
-        self.pool['accounts'][0].update(manual_disabled=True, manual_reason=accountrisk.PREFIX+'token_refresh HTTP 429')
+    def test_review_remains_during_outage_until_explicit_clear(self):
+        self.pool['accounts'][0]['refresh_risk'] = self.risk(needs_review=True, failures=3, until=self.now-1)
         self.assertTrue(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
         self.pool = {'connected':False}
         self.assertTrue(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
-        self.assertFalse(asyncio.run(accountrisk.paused('other', config.AUTH_DIR)))
-        self.pool = {'connected':True, 'accounts':[{'uid':self.uid, 'manual_disabled':False}]}
-        self.assertFalse(asyncio.run(accountrisk.paused(self.uid, config.AUTH_DIR)))
 
-    def test_refresh_guard_prevents_network_when_paused(self):
-        payload = {'uid':self.uid, 'refresh_token':'rt', '_risk_auth_dir':str(config.AUTH_DIR)}
-        with mock.patch.object(accountrisk, 'paused', new=mock.AsyncMock(return_value=True)), \
-             mock.patch.object(tencent, '_account_http_client') as network:
-            ok, message, _ = asyncio.run(tencent.refresh_token(payload))
-            self.assertFalse(ok)
-            self.assertIn('未发送', message)
-            network.assert_not_called()
+    def test_acknowledge_does_not_resume_and_history_is_readable(self):
+        self.pool['accounts'][0]['refresh_risk'] = self.risk()
+        item = asyncio.run(accountrisk.warnings())['items'][0]
+        self.assertTrue(accountrisk.acknowledge(item['id']))
+        self.assertTrue(asyncio.run(accountrisk.warnings())['items'][0]['paused'])
+        self.pool['accounts'][0]['refresh_risk']['until'] = self.now-1
+        self.assertEqual(asyncio.run(accountrisk.warnings())['items'], [])
+        self.assertEqual(asyncio.run(accountrisk.warnings(include_acknowledged=True))['items'][0]['id'], item['id'])
 
-    def test_account_routes_block_paused_account_without_scope_errors(self):
+    def test_missing_route_warns_without_permanent_file_fallback(self):
+        with mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock(return_value=(False, '', 'no_route', {}))), \
+             mock.patch.object(wb2api, 'set_account_disabled') as rename:
+            self.assertFalse(asyncio.run(accountrisk.pause_refresh(self.uid, config.AUTH_DIR)))
+            rename.assert_not_called()
+        self.assertTrue((config.AUTH_DIR/self.filename).exists())
+        self.assertEqual(asyncio.run(accountrisk.warnings())['items'][0]['action_error'], 'no_route')
+
+    def test_retry_after_boundaries(self):
+        import httpx
+        for header, body, expected in [('1',{},300),('900',{},900),('999999999',{},21600),('',{'retry_after':1200},1200),('',{'retry_policy':{'retry_after':1800}},1800),('',{},300)]:
+            response = httpx.Response(429,headers={'retry-after':header},json=body)
+            self.assertEqual(tencent._refresh_retry_after(response),expected)
+
+    def test_direct_failure_same_second_is_not_hidden_by_ack(self):
+        with mock.patch.object(accountrisk.time, 'time', return_value=self.now), \
+             mock.patch.object(wb2api, 'set_refresh_risk', new=mock.AsyncMock(side_effect=self.apply_pause)) as action:
+            asyncio.run(accountrisk.pause_refresh(self.uid,config.AUTH_DIR))
+            item=asyncio.run(accountrisk.warnings())['items'][0]
+            accountrisk.acknowledge(item['id'])
+            self.pool['accounts'][0]['refresh_risk'] = self.risk(until=0,failures=0)
+            asyncio.run(accountrisk.pause_refresh(self.uid,config.AUTH_DIR))
+            self.assertEqual(action.await_count,2)
+            self.assertFalse(asyncio.run(accountrisk.warnings())['items'][0]['acknowledged'])
+
+    def test_review_recovery_uses_dedicated_api_only(self):
+        self.pool['accounts'][0].update(refresh_risk=self.risk(needs_review=True,failures=3),manual_disabled=True,disabled=True)
+        item=asyncio.run(accountrisk.warnings())['items'][0]
+        with mock.patch.object(wb2api, 'clear_refresh_risk', new=mock.AsyncMock(return_value=(True,'','ok',{'refresh_risk':self.risk(until=0,needs_review=False,failures=0),'manual_disabled':True,'disabled':True}))) as clear, \
+             mock.patch.object(wb2api, 'set_manual_disabled') as manual, mock.patch.object(wb2api, 'revive_account') as revive:
+            self.assertTrue(asyncio.run(accountrisk.resume(item['id']))[0])
+            clear.assert_awaited_once();manual.assert_not_called();revive.assert_not_called()
+
+    def test_scope_does_not_leak(self):
+        accountrisk.record(config.AUTH_DIR,wb2api.list_auth_accounts()[0],'token_refresh',429,self.now)
+        other={**upstreamsvc.default_upstream(),'id':9,'name':'other','auth_dir':str(self.root/'other')}
+        Path(other['auth_dir']).mkdir()
+        with mock.patch.object(upstreamsvc,'get_upstream',return_value=other):
+            self.assertEqual(asyncio.run(accountrisk.warnings(group_id=9))['items'],[])
+
+    def test_refresh_guard_prevents_network(self):
+        payload={'uid':self.uid,'refresh_token':'rt','_risk_auth_dir':str(config.AUTH_DIR)}
+        with mock.patch.object(accountrisk,'paused',new=mock.AsyncMock(return_value=True)), mock.patch.object(tencent,'_account_http_client') as network:
+            self.assertFalse(asyncio.run(tencent.refresh_token(payload))[0]);network.assert_not_called()
+
+    def test_warning_and_recovery_permissions(self):
         from fastapi.testclient import TestClient
         from server.main import app
         from server import security
-        app.dependency_overrides[security.current_user] = lambda: {'username':'admin', 'role':'admin'}
-        client = TestClient(app)
-        try:
-            with mock.patch.object(accountrisk, 'paused', new=mock.AsyncMock(return_value=True)):
-                for action in ('checkin', 'credits', 'test'):
-                    request = client.get if action == 'credits' else client.post
-                    result = request(f'/api/accounts/{self.filename}/{action}?force=true')
-                    self.assertEqual(result.status_code, 200, result.text)
-                    self.assertIn('保护性暂停', result.text)
-        finally:
-            app.dependency_overrides.pop(security.current_user, None)
-            client.close()
-
-    def test_warning_api_requires_login_and_ack_requires_admin(self):
-        from fastapi.testclient import TestClient
-        from server.main import app
-        from server import security
-        client = TestClient(app, raise_server_exceptions=True)
-        try:
-            with mock.patch.object(security, 'load_users', return_value={'secret':'test-only', 'users':[]}):
-                self.assertEqual(client.get('/api/account-risk').status_code, 401)
-            app.dependency_overrides[security.current_user] = lambda: {'username':'viewer', 'role':'viewer'}
+        with TestClient(app) as client:
+            with mock.patch.object(security,'load_users',return_value={'secret':'test-only','users':[]}):
+                self.assertEqual(client.get('/api/account-risk').status_code,401)
+            app.dependency_overrides[security.current_user]=lambda:{'username':'viewer','role':'viewer'}
             try:
-                self.assertEqual(client.get('/api/account-risk').status_code, 200)
-                self.assertEqual(client.post('/api/account-risk/not-an-event/acknowledge').status_code, 403)
-            finally:
-                app.dependency_overrides.pop(security.current_user, None)
-        finally:
-            client.close()
+                self.assertEqual(client.get('/api/account-risk').status_code,200)
+                for action in ('acknowledge','resume'):
+                    self.assertEqual(client.post('/api/account-risk/id/'+action).status_code,403)
+            finally:app.dependency_overrides.pop(security.current_user,None)
+
+    def test_keepalive_summary_denominator(self):
+        from server.services import tasklog
+        event=tasklog.parse_line('2026-11-01T01:00:00Z keepalive done: checked=49 ok=35 failed=14 skipped=0')
+        self.assertIn('尝试 49，成功 35，失败 14',event['message'])

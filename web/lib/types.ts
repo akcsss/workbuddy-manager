@@ -5,7 +5,13 @@ export interface Me {
   role: Role;
 }
 
+export interface RefreshRisk {
+  until: number; last_failure_at: number; failures: number;
+  needs_review: boolean; retry_after_sec: number; paused: boolean;
+}
+
 export interface Account {
+  refresh_risk?: RefreshRisk | null;
   proxy?: string;
   /**
    * 手写权重（issue #187）：上游选号的**乘数**，默认 1；0 = 未设置（等价 1）。

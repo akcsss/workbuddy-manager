@@ -183,12 +183,14 @@ export interface AccountRiskEvent {
   id: string; uid: string; nickname: string; group: string; realm: string;
   operation: string; http_status: number; ts: number; historical: boolean;
   acknowledged: boolean; paused: boolean | null; action_error: string;
+  pause_until: number; needs_review: boolean; failures: number;
 }
 
 export const accountRiskApi = {
-  list: (realm: string, upstreamId: number | null = null, allGroups = false) =>
-    get<{items: AccountRiskEvent[]; failed_groups: string[]}>('/api/account-risk',
-      {realm, upstream_id: upstreamId ?? undefined, all_groups: allGroups}),
+  list: (realm: string, upstreamId: number | null = null, allGroups = false, includeAcknowledged = false) =>
+    get<{items: AccountRiskEvent[]; failed_groups: string[]; total: number}>('/api/account-risk',
+      {realm, upstream_id: upstreamId ?? undefined, all_groups: allGroups, include_acknowledged: includeAcknowledged}),
+  resume: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/resume`),
   acknowledge: (id: string) => post<{ok: boolean}>(`/api/account-risk/${encodeURIComponent(id)}/acknowledge`),
 };
 

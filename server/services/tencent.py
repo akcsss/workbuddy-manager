@@ -134,6 +134,23 @@ def _billing_hdr(realm: Realm, auth: dict | str | None = None) -> dict:
     return billing_headers(realm, auth)
 
 
+def _refresh_retry_after(resp: httpx.Response) -> int:
+    from email.utils import parsedate_to_datetime
+    raw = resp.headers.get('retry-after', '')
+    try:
+        seconds = int(raw)
+    except (ValueError, TypeError):
+        try:
+            seconds = int(parsedate_to_datetime(raw).timestamp() - time.time())
+        except (ValueError, TypeError, OverflowError):
+            try:
+                body = resp.json()
+                seconds = int(body.get('retry_after') or (body.get('retry_policy') or {}).get('retry_after') or 300)
+            except (ValueError, TypeError, AttributeError):
+                seconds = 300
+    return max(300, min(21600, seconds))
+
+
 @asynccontextmanager
 async def _risk_checked_client(client, auth: dict):
     from . import accountrisk
@@ -549,7 +566,7 @@ async def refresh_token(auth: dict) -> tuple[bool, str, dict]:
     if '_risk_auth_dir' in auth:
         from . import accountrisk
         if await accountrisk.paused(str(auth.get('uid') or ''), auth['_risk_auth_dir']):
-            return False, '账号已保护性暂停，未发送刷新请求；请先检查账号预警并手动启用', {}
+            return False, '账号已保护性暂停，未发送刷新请求；请先检查账号预警；限时暂停到期自动允许重试，需人工复核时使用预警中的解除暂停', {}
     if not refresh:
         return False, '该账号没有 refreshToken（只能重新扫码或登录）', {}
 
@@ -580,7 +597,7 @@ async def refresh_token(auth: dict) -> tuple[bool, str, dict]:
             paused = False
             if '_risk_auth_dir' in auth:
                 from . import accountrisk
-                paused = await accountrisk.pause_refresh(str(auth.get('uid') or ''), auth['_risk_auth_dir'])
+                paused = await accountrisk.pause_refresh(str(auth.get('uid') or ''), auth['_risk_auth_dir'], retry_after=_refresh_retry_after(resp))
             return False, ('令牌刷新接口限流（HTTP 429），不是凭证失效；'
                            + ('已保护性暂停该账号，请查看账号预警' if paused else '请查看账号预警，暂停状态尚未确认')), {}
         # 12153 / session dead 的典型表现：refreshToken 也失效了，只能重新登录。
@@ -616,6 +633,9 @@ async def refresh_token(auth: dict) -> tuple[bool, str, dict]:
     if isinstance(body.get('domain'), str) and body['domain']:
         out['domain'] = body['domain']
 
+    if '_risk_auth_dir' in auth:
+        from . import accountrisk
+        await accountrisk.note_refresh_success(uid, auth['_risk_auth_dir'])
     when = out.get('expires_at')
     if when:
         left = max(0, when - int(time.time()))
