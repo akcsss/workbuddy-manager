@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 
 from .. import db, upstreamsvc
-from . import taskrun
+from . import taskrun, taskpacing
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,10 @@ async def run_task(task: str) -> tuple[bool, str]:
     mode = 'claim' if task == 'claim' else 'full'
     results: list[str] = []
     ok_all = True
+    group_pacer = taskpacing.AccountPacer(mode)
     for g in groups:
+        # Scripts pace accounts within a group; keep a gap between groups too.
+        await group_pacer.wait()
         ok, msg = await taskrun.start_async(
             mode, 'ALL', auth_dir=g.get('auth_dir'), group_name=str(g.get('name') or ''),
         )
@@ -260,7 +263,8 @@ async def _loop() -> None:
                     continue
                 logger.info('每日任务触发：%s（%s 点档）', task, plan[task]['hour'])
                 try:
-                    ok, msg = await run_task(task)
+                    with taskpacing.scheduled_execution():
+                        ok, msg = await run_task(task)
                     logger.info('每日任务 %s：ok=%s %s', task, ok, msg)
                 except Exception as exc:  # noqa: BLE001
                     # 单个任务出错不该拖垮整轮巡检（下一个任务照常判）

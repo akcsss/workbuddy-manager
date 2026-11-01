@@ -1138,6 +1138,10 @@ _AUDIT_LOG_MAX_ROWS = 20000
 def _prune_side_tables() -> None:
     """给只增不减的侧表加保留期 / 条数上限。旁路操作，失败绝不影响主流程。"""
     now = int(time.time())
+    # 时钟早于保留期（测试桩把 time.time 打到 0、或系统钟异常）时没有可清理的旧
+    # 数据；而 Windows 的 localtime 不接受负时间戳（OSError: Invalid argument）。
+    if now <= _HOURLY_RETAIN_DAYS * 86400:
+        return
     hourly_cutoff = time.strftime('%Y-%m-%d',
                                   time.localtime(now - _HOURLY_RETAIN_DAYS * 86400))
     task_cutoff = now - _TASK_LOG_RETAIN_DAYS * 86400
